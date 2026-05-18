@@ -1,486 +1,398 @@
-import math
-import random
-import sys
-
-import pygame
-
-# =============================================
-# CONFIG
-# =============================================
-WINDOW_W = 900
-WINDOW_H = 900
-TILE_SIZE = 80  # px per tile
-GRID_COLS = 11
-GRID_ROWS = 11
-SEED = None  # None = random each run, or set integer for fixed map
-
-# Road anatomy (in px, relative to tile)
-ROAD_W = 34  # road band width
-SIDEWALK_W = 6  # curb strip width
-DASH_ON = 10
-DASH_OFF = 8
-
-# Colors
-C_BG = (13, 15, 23)
-C_GRASS = (16, 20, 30)
-C_SIDEWALK = (35, 40, 58)
-C_ROAD = (28, 33, 50)
-C_DASH = (50, 58, 88)
-C_NODE_DOT = (80, 100, 160)
-C_GRID_LINE = (22, 26, 38)
-
-# =============================================
-# TILE TYPES & PORT DEFINITIONS
-# =============================================
-EMPTY = 0
-STRAIGHT = 1
-CURVE = 2
-TJUNCTION = 3
-CROSS = 4
-
-# Ports: N=0  E=1  S=2  W=3
-# Each entry is a tuple of open port sets per rotation
-TILE_PORTS = {
-    STRAIGHT: [
-        {0, 2},  # rot0: N-S  (vertical)
-        {1, 3},  # rot1: E-W  (horizontal)
-    ],
-    CURVE: [
-        {0, 1},  # rot0: N-E
-        {1, 2},  # rot1: E-S
-        {2, 3},  # rot2: S-W
-        {3, 0},  # rot3: W-N
-    ],
-    TJUNCTION: [
-        {0, 1, 2},  # rot0: N-E-S
-        {1, 2, 3},  # rot1: E-S-W
-        {2, 3, 0},  # rot2: S-W-N
-        {3, 0, 1},  # rot3: W-N-E
-    ],
-    CROSS: [
-        {0, 1, 2, 3},  # no rotation
-    ],
-}
-
-OPPOSITE = {0: 2, 2: 0, 1: 3, 3: 1}  # N↔S, E↔W
-DIR_DELTA = {0: (0, -1), 1: (1, 0), 2: (0, 1), 3: (-1, 0)}  # N E S W
-
-
-def get_ports(tile_type, rotation):
-    options = TILE_PORTS.get(tile_type, [])
-    if not options:
-        return set()
-    return options[rotation % len(options)]
-
-
-def can_connect(type_a, rot_a, type_b, rot_b, direction):
-    """Does tile_a's port in `direction` match tile_b's opposing port?"""
-    ports_a = get_ports(type_a, rot_a)
-    ports_b = get_ports(type_b, rot_b)
-    return (direction in ports_a) and (OPPOSITE[direction] in ports_b)
-
-
-# =============================================
-# GRID
-# =============================================
-class Tile:
-    def __init__(self):
-        self.type = EMPTY
-        self.rotation = 0
-
-
-class Grid:
-    def __init__(self, cols, rows):
-        self.cols = cols
-        self.rows = rows
-        self.cells = [[Tile() for _ in range(cols)] for _ in range(rows)]
-
-    def get(self, col, row):
-        if 0 <= col < self.cols and 0 <= row < self.rows:
-            return self.cells[row][col]
-        return None
-
-    def set_tile(self, col, row, tile_type, rotation=0):
-        self.cells[row][col].type = tile_type
-        self.cells[row][col].rotation = rotation
-
-    def is_road(self, col, row):
-        t = self.get(col, row)
-        return t is not None and t.type != EMPTY
-
-
-# =============================================
-# IMPORT GENERATION FROM gen.py
-# =============================================
+import math, random, sys, pygame
 from gen import generate_map, _find_dead_ends
+from engine import Camera, astar, Car, TileCache, build_world_path, get_ports, EMPTY, STRAIGHT, CURVE, TJUNCTION, CROSS, TILE_PORTS, OPPOSITE, DIR_DELTA
 
+# ── CONFIG ──
+W, H = 1280, 800
+T = 80; RW = 34; SW = 6; MG = (T - RW) // 2
+GCOLS, GROWS = 50, 50
+DASH_ON, DASH_OFF = 10, 8
+SEED = None
 
-# =============================================
-# BEZIER ROAD RENDERER
-# =============================================
-T = TILE_SIZE
-RW = ROAD_W
-SW = SIDEWALK_W
-MG = (T - RW) // 2  # margin from tile edge to road edge
+# ── COLORS ──
+C_BG = (13,15,23); C_GRASS = (16,20,30); C_SW = (35,40,58)
+C_ROAD = (28,33,50); C_DASH = (50,58,88); C_NODE = (80,100,160)
+C_PATH = (0,210,110); C_EXPLORED = (40,80,140)
+C_START = (0,220,80); C_END = (220,50,50); C_HOVER = (255,220,60)
+C_UI = (100,130,200); C_UIK = (70,90,140); C_UIA = (0,180,100)
 
-
-def _road_rect_pts(x, y, rot):
-    """Returns (rect_x, rect_y, rect_w, rect_h) for a straight road band."""
-    if rot == 0:  # vertical
-        return (x + MG, y, RW, T)
-    else:  # horizontal
-        return (x, y + MG, T, RW)
-
-
-def draw_sidewalk(surf, x, y, tile_type, rotation):
-    """Draw curb/sidewalk strips on the closed sides of a tile."""
-    ports = get_ports(tile_type, rotation)
-    closed = {0, 1, 2, 3} - ports
-    for d in closed:
-        if d == 0:  # N closed
-            pygame.draw.rect(surf, C_SIDEWALK, (x + MG, y, RW, SW))
-        elif d == 2:  # S closed
-            pygame.draw.rect(surf, C_SIDEWALK, (x + MG, y + T - SW, RW, SW))
-        elif d == 3:  # W closed
-            pygame.draw.rect(surf, C_SIDEWALK, (x, y + MG, SW, RW))
-        elif d == 1:  # E closed
-            pygame.draw.rect(surf, C_SIDEWALK, (x + T - SW, y + MG, SW, RW))
-
-
-def draw_straight(surf, x, y, rotation):
-    rx, ry, rw, rh = _road_rect_pts(x, y, rotation)
-    # sidewalk strips on closed sides
-    if rotation == 0:
-        pygame.draw.rect(surf, C_SIDEWALK, (x, y, MG, T))
-        pygame.draw.rect(surf, C_SIDEWALK, (x + T - MG, y, MG, T))
-    else:
-        pygame.draw.rect(surf, C_SIDEWALK, (x, y, T, MG))
-        pygame.draw.rect(surf, C_SIDEWALK, (x, y + T - MG, T, MG))
-    # road surface
-    pygame.draw.rect(surf, C_ROAD, (rx, ry, rw, rh))
-    # center dashes
-    _draw_dashes_straight(surf, x, y, rotation)
-
-
-def _draw_dashes_straight(surf, x, y, rotation):
-    cx = x + T // 2
-    cy = y + T // 2
-    if rotation == 0:
-        _dashes_line(surf, cx, y + 4, cx, y + T - 4, vertical=True)
-    else:
-        _dashes_line(surf, x + 4, cy, x + T - 4, cy, vertical=False)
-
-
-def _dashes_line(surf, x1, y1, x2, y2, vertical=True):
-    length = (y2 - y1) if vertical else (x2 - x1)
-    pos = 0
-    drawing = True
-    while pos < length:
-        seg = DASH_ON if drawing else DASH_OFF
-        seg = min(seg, length - pos)
-        if drawing:
-            if vertical:
-                pygame.draw.line(surf, C_DASH, (x1, y1 + pos), (x1, y1 + pos + seg), 1)
-            else:
-                pygame.draw.line(surf, C_DASH, (x1 + pos, y1), (x1 + pos + seg, y1), 1)
-        pos += seg
-        drawing = not drawing
-
-
-# --- Bezier helpers ---
-def _bezier_quad(p0, p1, p2, steps=24):
-    """Quadratic Bezier from p0 to p2 with control p1."""
-    pts = []
-    for i in range(steps + 1):
-        t = i / steps
-        u = 1 - t
-        bx = u * u * p0[0] + 2 * u * t * p1[0] + t * t * p2[0]
-        by = u * u * p0[1] + 2 * u * t * p1[1] + t * t * p2[1]
-        pts.append((bx, by))
+# ── BEZIER HELPERS ──
+def _bquad(p0,p1,p2,s=24):
+    pts=[]
+    for i in range(s+1):
+        t=i/s; u=1-t
+        pts.append((u*u*p0[0]+2*u*t*p1[0]+t*t*p2[0], u*u*p0[1]+2*u*t*p1[1]+t*t*p2[1]))
     return pts
 
-
-def _offset_curve(pts, offset, normal_side="left"):
-    """Offset a polyline by `offset` px to left or right."""
-    result = []
-    n = len(pts)
+def _offcurve(pts,off,side="left"):
+    r=[]; n=len(pts)
     for i in range(n):
-        if i == 0:
-            dx = pts[1][0] - pts[0][0]
-            dy = pts[1][1] - pts[0][1]
-        elif i == n - 1:
-            dx = pts[-1][0] - pts[-2][0]
-            dy = pts[-1][1] - pts[-2][1]
-        else:
-            dx = pts[i + 1][0] - pts[i - 1][0]
-            dy = pts[i + 1][1] - pts[i - 1][1]
-        l = math.hypot(dx, dy)
-        if l < 1e-9:
-            l = 1
-        nx, ny = -dy / l, dx / l  # left normal
-        if normal_side == "right":
-            nx, ny = -nx, -ny
-        result.append((pts[i][0] + nx * offset, pts[i][1] + ny * offset))
-    return result
+        if i==0: dx,dy=pts[1][0]-pts[0][0],pts[1][1]-pts[0][1]
+        elif i==n-1: dx,dy=pts[-1][0]-pts[-2][0],pts[-1][1]-pts[-2][1]
+        else: dx,dy=pts[i+1][0]-pts[i-1][0],pts[i+1][1]-pts[i-1][1]
+        l=math.hypot(dx,dy) or 1; nx,ny=-dy/l,dx/l
+        if side=="right": nx,ny=-nx,-ny
+        r.append((pts[i][0]+nx*off, pts[i][1]+ny*off))
+    return r
 
+def _fband(s,cp,hw,col):
+    if len(cp)<2: return
+    L=_offcurve(cp,hw,"left"); R=_offcurve(cp,hw,"right")
+    p=L+list(reversed(R))
+    if len(p)>=3: pygame.draw.polygon(s,col,[(int(a),int(b)) for a,b in p])
 
-def _filled_band(surf, center_pts, half_w, color):
-    """Draw a filled road band around a center polyline."""
-    if len(center_pts) < 2:
-        return
-    left = _offset_curve(center_pts, half_w, "left")
-    right = _offset_curve(center_pts, half_w, "right")
-    poly = left + list(reversed(right))
-    if len(poly) >= 3:
-        pygame.draw.polygon(surf, color, [(int(p[0]), int(p[1])) for p in poly])
+def _dashline(s,x1,y1,x2,y2,vert=True):
+    ln=(y2-y1) if vert else (x2-x1); pos=0; dr=True
+    while pos<ln:
+        sg=min(DASH_ON if dr else DASH_OFF, ln-pos)
+        if dr:
+            if vert: pygame.draw.line(s,C_DASH,(x1,y1+pos),(x1,y1+pos+sg),1)
+            else: pygame.draw.line(s,C_DASH,(x1+pos,y1),(x1+pos+sg,y1),1)
+        pos+=sg; dr=not dr
 
+def _bdash(s,pts,col,da=10,ga=8):
+    acc=0; dr=True
+    for i in range(len(pts)-1):
+        ax,ay=pts[i]; bx,by=pts[i+1]; sg=math.hypot(bx-ax,by-ay)
+        if sg<.001: continue
+        dx,dy=(bx-ax)/sg,(by-ay)/sg; t=0
+        while t<sg:
+            p=da if dr else ga; rm=min(p-acc,sg-t)
+            if dr:
+                sx2,sy2=ax+dx*t,ay+dy*t; ex2,ey2=ax+dx*(t+rm),ay+dy*(t+rm)
+                pygame.draw.line(s,col,(int(sx2),int(sy2)),(int(ex2),int(ey2)),1)
+            t+=rm; acc+=rm
+            if acc>=p: acc=0; dr=not dr
 
-def draw_curve(surf, x, y, rotation):
-    """
-    Smooth quarter-circle road bend using offset Bezier bands.
-    rot0: N-port → E-port  (enters from top, exits right)
-    rot1: E → S
-    rot2: S → W
-    rot3: W → N
-    """
-    cx = x + T // 2
-    cy = y + T // 2
+# ── TILE DRAW FUNCTIONS (used for HIGH LOD cache) ──
+def _draw_sidewalk(s,x,y,tt,rot):
+    ports=get_ports(tt,rot); closed={0,1,2,3}-ports
+    for d in closed:
+        if d==0: pygame.draw.rect(s,C_SW,(x+MG,y,RW,SW))
+        elif d==2: pygame.draw.rect(s,C_SW,(x+MG,y+T-SW,RW,SW))
+        elif d==3: pygame.draw.rect(s,C_SW,(x,y+MG,SW,RW))
+        elif d==1: pygame.draw.rect(s,C_SW,(x+T-SW,y+MG,SW,RW))
 
-    # Port midpoints (world coords)
-    port_mid = {
-        0: (x + T // 2, y),  # N
-        1: (x + T, y + T // 2),  # E
-        2: (x + T // 2, y + T),  # S
-        3: (x, y + T // 2),  # W
-    }
-    # Corner control points for each rotation
-    corners = {
-        0: (x + T, y),  # rot0 N-E: top-right corner
-        1: (x + T, y + T),  # rot1 E-S: bottom-right
-        2: (x, y + T),  # rot2 S-W: bottom-left
-        3: (x, y),  # rot3 W-N: top-left
-    }
-    port_pairs = {0: (0, 1), 1: (1, 2), 2: (2, 3), 3: (3, 0)}
+def _draw_straight(s,x,y,rot):
+    if rot==0:
+        pygame.draw.rect(s,C_SW,(x,y,MG,T)); pygame.draw.rect(s,C_SW,(x+T-MG,y,MG,T))
+        pygame.draw.rect(s,C_ROAD,(x+MG,y,RW,T))
+        cx=x+T//2; _dashline(s,cx,y+4,cx,y+T-4,True)
+    else:
+        pygame.draw.rect(s,C_SW,(x,y,T,MG)); pygame.draw.rect(s,C_SW,(x,y+T-MG,T,MG))
+        pygame.draw.rect(s,C_ROAD,(x,y+MG,T,RW))
+        cy=y+T//2; _dashline(s,x+4,cy,x+T-4,cy,False)
 
-    p_from, p_to = port_pairs[rotation]
-    start = port_mid[p_from]
-    end = port_mid[p_to]
-    ctrl = (cx, cy)  # center = inward bend
+def _draw_curve(s,x,y,rot):
+    cx,cy=x+T//2,y+T//2
+    pm={0:(x+T//2,y),1:(x+T,y+T//2),2:(x+T//2,y+T),3:(x,y+T//2)}
+    pp={0:(0,1),1:(1,2),2:(2,3),3:(3,0)}
+    pf,pt=pp[rot]; start,end=pm[pf],pm[pt]; ctrl=(cx,cy)
+    cc=_bquad(start,ctrl,end,32)
+    _draw_sidewalk(s,x,y,CURVE,rot)
+    _fband(s,cc,RW//2,C_ROAD); _bdash(s,cc,C_DASH)
 
-    center_curve = _bezier_quad(start, ctrl, end, steps=32)
-
-    # sidewalk on closed sides
-    draw_sidewalk(surf, x, y, CURVE, rotation)
-
-    # road band
-    _filled_band(surf, center_curve, RW // 2, C_ROAD)
-
-    # center dash
-    _draw_bezier_dashes(surf, center_curve, C_DASH)
-
-
-def _draw_bezier_dashes(surf, pts, color, dash=10, gap=8):
-    acc = 0
-    drawing = True
-    for i in range(len(pts) - 1):
-        ax, ay = pts[i]
-        bx, by = pts[i + 1]
-        seg = math.hypot(bx - ax, by - ay)
-        if seg < 0.001:
-            continue
-        dx, dy = (bx - ax) / seg, (by - ay) / seg
-        t = 0
-        while t < seg:
-            period = dash if drawing else gap
-            rem = min(period - acc, seg - t)
-            if drawing:
-                sx, sy = ax + dx * t, ay + dy * t
-                ex, ey = ax + dx * (t + rem), ay + dy * (t + rem)
-                pygame.draw.line(surf, color, (int(sx), int(sy)), (int(ex), int(ey)), 1)
-            t += rem
-            acc += rem
-            if acc >= period:
-                acc = 0
-                drawing = not drawing
-
-
-def draw_tjunction(surf, x, y, rotation):
-    """T-junction with inward-curving Bézier arcs between port pairs."""
-    ports = list(get_ports(TJUNCTION, rotation))
-    center = (x + T // 2, y + T // 2)
-    port_mid = {
-        0: (x + T // 2, y),
-        1: (x + T, y + T // 2),
-        2: (x + T // 2, y + T),
-        3: (x, y + T // 2),
-    }
-
-    # sidewalk on closed side
-    draw_sidewalk(surf, x, y, TJUNCTION, rotation)
-
-    # Draw Bézier arcs between all port pairs using CENTER as control
-    # Adjacent pairs → inward concave curves; Opposite pairs → straight
-    for i, p1 in enumerate(ports):
+def _draw_tjunc(s,x,y,rot):
+    ports=list(get_ports(TJUNCTION,rot)); ctr=(x+T//2,y+T//2)
+    pm={0:(x+T//2,y),1:(x+T,y+T//2),2:(x+T//2,y+T),3:(x,y+T//2)}
+    _draw_sidewalk(s,x,y,TJUNCTION,rot)
+    for i,p1 in enumerate(ports):
         for p2 in ports[i+1:]:
-            start = port_mid[p1]
-            end = port_mid[p2]
-            curve = _bezier_quad(start, center, end, steps=24)
-            _filled_band(surf, curve, RW // 2, C_ROAD)
-            _draw_bezier_dashes(surf, curve, C_DASH)
+            c=_bquad(pm[p1],ctr,pm[p2],24); _fband(s,c,RW//2,C_ROAD); _bdash(s,c,C_DASH)
+    pygame.draw.circle(s,C_ROAD,(int(ctr[0]),int(ctr[1])),RW//3+1)
 
-    # Center fill for smooth merge
-    pygame.draw.circle(surf, C_ROAD, (int(center[0]), int(center[1])), RW // 3 + 1)
-
-
-def draw_cross(surf, x, y):
-    """Cross intersection with inward-curving Bézier arcs."""
-    center = (x + T // 2, y + T // 2)
-    port_mid = {
-        0: (x + T // 2, y),
-        1: (x + T, y + T // 2),
-        2: (x + T // 2, y + T),
-        3: (x, y + T // 2),
-    }
-
-    # Draw all 6 port pairs through center (inward curves for adjacent,
-    # straight for opposite)
+def _draw_cross(s,x,y,rot=0):
+    ctr=(x+T//2,y+T//2)
+    pm={0:(x+T//2,y),1:(x+T,y+T//2),2:(x+T//2,y+T),3:(x,y+T//2)}
     for p1 in range(4):
-        for p2 in range(p1+1, 4):
-            start = port_mid[p1]
-            end = port_mid[p2]
-            curve = _bezier_quad(start, center, end, steps=24)
-            _filled_band(surf, curve, RW // 2, C_ROAD)
+        for p2 in range(p1+1,4):
+            c=_bquad(pm[p1],ctr,pm[p2],24); _fband(s,c,RW//2,C_ROAD)
+    pygame.draw.circle(s,C_ROAD,(int(ctr[0]),int(ctr[1])),RW//3+2)
+    cr=max(2,MG-4)
+    for px,py in [(x,y),(x+T,y),(x,y+T),(x+T,y+T)]:
+        pygame.draw.circle(s,C_SW,(px,py),cr)
+    for p1,p2 in [(0,2),(1,3)]:
+        c=_bquad(pm[p1],ctr,pm[p2],24); _bdash(s,c,C_DASH)
 
-    # Center fill
-    pygame.draw.circle(surf, C_ROAD, (int(center[0]), int(center[1])), RW // 3 + 2)
+def _draw_tile_for_cache(s,x,y,tt,rot):
+    if tt==STRAIGHT: _draw_straight(s,x,y,rot)
+    elif tt==CURVE: _draw_curve(s,x,y,rot)
+    elif tt==TJUNCTION: _draw_tjunc(s,x,y,rot)
+    elif tt==CROSS: _draw_cross(s,x,y,rot)
 
-    # Subtle corner sidewalk curbs
-    curb_r = max(2, MG - 4)
-    for px, py in [(x, y), (x + T, y), (x, y + T), (x + T, y + T)]:
-        pygame.draw.circle(surf, C_SIDEWALK, (px, py), curb_r)
+# ── MINIMAP ──
+def build_minimap(grid, path=None, msize=180):
+    cols,rows=grid.cols,grid.rows
+    sc=msize/max(cols,rows)
+    s=pygame.Surface((int(cols*sc)+2,int(rows*sc)+2)); s.fill((20,24,35))
+    for r in range(rows):
+        for c in range(cols):
+            t=grid.cells[r][c]
+            if t.type!=EMPTY:
+                pygame.draw.rect(s,(50,60,90),(int(c*sc),int(r*sc),max(1,int(sc)),max(1,int(sc))))
+    if path:
+        for c,r in path:
+            pygame.draw.rect(s,C_PATH,(int(c*sc),int(r*sc),max(1,int(sc)),max(1,int(sc))))
+    return s, sc
 
-    # Dashes on straight-throughs only
-    for p1, p2 in [(0, 2), (1, 3)]:
-        start = port_mid[p1]
-        end = port_mid[p2]
-        curve = _bezier_quad(start, center, end, steps=24)
-        _draw_bezier_dashes(surf, curve, C_DASH)
-
-
-def draw_tile(surf, col, row, tile, ox=0, oy=0):
-    x = ox + col * T
-    y = oy + row * T
-    if tile.type == EMPTY:
-        pygame.draw.rect(surf, C_GRASS, (x, y, T, T))
-        return
-    pygame.draw.rect(surf, C_GRASS, (x, y, T, T))
-    if tile.type == STRAIGHT:
-        draw_straight(surf, x, y, tile.rotation)
-    elif tile.type == CURVE:
-        draw_curve(surf, x, y, tile.rotation)
-    elif tile.type == TJUNCTION:
-        draw_tjunction(surf, x, y, tile.rotation)
-    elif tile.type == CROSS:
-        draw_cross(surf, x, y)
-
-
-def draw_grid(surf, grid, ox=0, oy=0):
-    for r in range(grid.rows):
-        for c in range(grid.cols):
-            draw_tile(surf, c, r, grid.cells[r][c], ox, oy)
-
-
-def draw_node_dots(surf, grid, ox=0, oy=0):
-    """Debug: highlight intersection nodes."""
-    for r in range(grid.rows):
-        for c in range(grid.cols):
-            tile = grid.cells[r][c]
-            if tile.type in (CURVE, TJUNCTION, CROSS):
-                sx = ox + c * T + T // 2
-                sy = oy + r * T + T // 2
-                pygame.draw.circle(surf, C_NODE_DOT, (sx, sy), 4)
-
-
-# =============================================
+# ══════════════════════════════════════
 # MAIN
-# =============================================
+# ══════════════════════════════════════
 def main():
     pygame.init()
-    screen = pygame.display.set_mode((WINDOW_W, WINDOW_H))
-    pygame.display.set_caption("Seruni Map — Grid + Bézier")
-    clock = pygame.time.Clock()
-    font = pygame.font.SysFont("monospace", 13)
-    font_s = pygame.font.SysFont("monospace", 11)
+    screen=pygame.display.set_mode((W,H))
+    pygame.display.set_caption("Seruni Map — A* Pathfinding + Zoom")
+    clock=pygame.time.Clock()
+    font=pygame.font.SysFont("consolas",13)
+    font_b=pygame.font.SysFont("consolas",28,bold=True)
 
-    seed = SEED if SEED is not None else random.randint(0, 0xFFFFFF)
+    seed=SEED if SEED else random.randint(0,0xFFFFFF)
+    generating=True
+
+    def show_loading():
+        screen.fill(C_BG)
+        t=font_b.render("Generating map...",True,C_UI)
+        screen.blit(t,(W//2-t.get_width()//2,H//2-20))
+        pygame.display.flip()
 
     def rebuild(s):
-        g = generate_map(GRID_COLS, GRID_ROWS, seed=s)
-        road_count = sum(
-            1
-            for r in range(g.rows)
-            for c in range(g.cols)
-            if g.cells[r][c].type != EMPTY
-        )
-        all_dead = _find_dead_ends(g)
-        # Only count interior dead-ends (border ones are acceptable exits)
-        dead = sum(1 for c, r in all_dead
-                   if c > 0 and c < g.cols-1 and r > 0 and r < g.rows-1)
-        return g, road_count, dead
+        show_loading()
+        g=generate_map(GCOLS,GROWS,seed=s)
+        rc=sum(1 for r in range(g.rows) for c in range(g.cols) if g.cells[r][c].type!=EMPTY)
+        de=_find_dead_ends(g)
+        dc=sum(1 for c2,r2 in de if 0<c2<g.cols-1 and 0<r2<g.rows-1)
+        return g,rc,dc
 
-    grid, road_count, dead_count = rebuild(seed)
+    grid,road_count,dead_count=rebuild(seed)
+    world_w,world_h=GCOLS*T,GROWS*T
+    cam=Camera(world_w,world_h,W,H)
 
-    # center the grid on screen
-    def get_offset(g):
-        gw = g.cols * T
-        gh = g.rows * T
-        return (WINDOW_W - gw) // 2, (WINDOW_H - gh) // 2
+    # Build tile cache
+    draw_map={STRAIGHT:_draw_tile_for_cache,CURVE:_draw_tile_for_cache,
+              TJUNCTION:_draw_tile_for_cache,CROSS:_draw_tile_for_cache}
+    tcache=TileCache(T,draw_map)
+    tcache.build(C_GRASS,C_ROAD,C_SW)
 
-    show_nodes = True
-    running = True
+    car=Car()
+    show_nodes=False; follow_car=False
+    start_pt=None; end_pt=None; path_result=None; world_path=None; explored_set=set()
+    select_mode=0  # 0=select start, 1=select end
+    minimap_surf,minimap_sc=build_minimap(grid)
 
+    # Road cells set for random selection
+    def get_road_cells():
+        return [(c,r) for r in range(grid.rows) for c in range(grid.cols) if grid.cells[r][c].type!=EMPTY]
+
+    def do_pathfind():
+        nonlocal path_result, world_path, explored_set, minimap_surf, minimap_sc
+        if start_pt and end_pt:
+            path_result, explored_set = astar(grid, start_pt, end_pt)
+            if path_result:
+                world_path = build_world_path(grid, path_result, T)
+            else:
+                world_path = None
+            minimap_surf, minimap_sc = build_minimap(grid, path_result)
+        else:
+            path_result=None; world_path=None; explored_set=set()
+            minimap_surf, minimap_sc = build_minimap(grid)
+
+    def clear_all():
+        nonlocal start_pt, end_pt, path_result, world_path, explored_set, select_mode, minimap_surf, minimap_sc
+        start_pt=end_pt=path_result=world_path=None; explored_set=set(); select_mode=0
+        car.reset()
+        minimap_surf, minimap_sc = build_minimap(grid)
+
+    running=True
     while running:
-        ox, oy = get_offset(grid)
+        dt=clock.tick(60)/1000.0
+        mx,my=pygame.mouse.get_pos()
+        # World pos under mouse
+        wmx,wmy=cam.screen_to_world(mx,my)
+        hover_c,hover_r=int(wmx//T),int(wmy//T)
+        hover_valid=(0<=hover_c<GCOLS and 0<=hover_r<GROWS and grid.cells[hover_r][hover_c].type!=EMPTY)
 
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                running = False
-            if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE:
-                    running = False
-                if event.key == pygame.K_r:
-                    seed = random.randint(0, 0xFFFFFF)
-                    grid, road_count, dead_count = rebuild(seed)
-                if event.key == pygame.K_n:
-                    show_nodes = not show_nodes
+        for ev in pygame.event.get():
+            if ev.type==pygame.QUIT: running=False
+            elif ev.type==pygame.KEYDOWN:
+                if ev.key==pygame.K_ESCAPE: running=False
+                elif ev.key==pygame.K_r:
+                    seed=random.randint(0,0xFFFFFF); grid,road_count,dead_count=rebuild(seed)
+                    world_w,world_h=GCOLS*T,GROWS*T; cam=Camera(world_w,world_h,W,H)
+                    tcache.build(C_GRASS,C_ROAD,C_SW); clear_all()
+                    minimap_surf,minimap_sc=build_minimap(grid)
+                elif ev.key==pygame.K_n: show_nodes=not show_nodes
+                elif ev.key==pygame.K_p:
+                    rc=get_road_cells()
+                    if len(rc)>=2:
+                        mn=max(GCOLS,GROWS)//4
+                        for _ in range(200):
+                            a,b=random.sample(rc,2)
+                            if abs(a[0]-b[0])+abs(a[1]-b[1])>=mn: break
+                        start_pt,end_pt=a,b; select_mode=0; do_pathfind()
+                elif ev.key==pygame.K_SPACE:
+                    if world_path and not car.active:
+                        car.start(world_path)
+                    elif car.active:
+                        car.active=not car.active  # pause/resume
+                elif ev.key==pygame.K_f: follow_car=not follow_car
+                elif ev.key==pygame.K_c: clear_all()
+                elif ev.key in (pygame.K_EQUALS,pygame.K_PLUS,pygame.K_KP_PLUS): car.change_speed(0.5)
+                elif ev.key in (pygame.K_MINUS,pygame.K_KP_MINUS): car.change_speed(-0.5)
+            elif ev.type==pygame.MOUSEBUTTONDOWN:
+                if ev.button==1:
+                    if hover_valid:
+                        if select_mode==0:
+                            start_pt=(hover_c,hover_r); end_pt=None; path_result=None
+                            explored_set=set(); select_mode=1; car.reset()
+                        elif select_mode==1:
+                            end_pt=(hover_c,hover_r); select_mode=0; do_pathfind()
+                    else:
+                        cam.start_drag(mx,my)
+                elif ev.button==3: cam.start_drag(mx,my)
+                elif ev.button==4: cam.zoom_at(mx,my,1.15)
+                elif ev.button==5: cam.zoom_at(mx,my,1/1.15)
+            elif ev.type==pygame.MOUSEBUTTONUP:
+                if ev.button in (1,3): cam.stop_drag()
+            elif ev.type==pygame.MOUSEMOTION:
+                cam.do_drag(mx,my)
 
+        # Update car
+        if car.active and not car.finished:
+            car.update(dt, T)
+        if follow_car and car.active:
+            wx,wy=car.get_world_pos(); cam.center_on(wx,wy,0.1)
+
+        # ── RENDER ──
         screen.fill(C_BG)
-        draw_grid(screen, grid, ox, oy)
-        if show_nodes:
-            draw_node_dots(screen, grid, ox, oy)
+        lod=cam.get_lod()
+        c0,c1,r0,r1=cam.get_visible_tiles(T,GCOLS,GROWS)
 
-        # HUD
-        lines = [
-            f"Seed     : {seed:06X}",
-            f"Tiles    : {GRID_COLS}x{GRID_ROWS}",
-            f"Roads    : {road_count}",
-            f"Dead ends: {dead_count}",
-            "",
-            "[R] New map",
-            "[N] Toggle nodes",
-            "[ESC] Quit",
+        if lod==0:
+            # LOW LOD: draw small colored rects
+            for r in range(r0,r1):
+                for c in range(c0,c1):
+                    t=grid.cells[r][c]
+                    wx,wy=c*T,r*T
+                    sx,sy=cam.world_to_screen(wx,wy)
+                    sz=max(1,int(T*cam.zoom))
+                    col=C_ROAD if t.type!=EMPTY else C_GRASS
+                    pygame.draw.rect(screen,col,(int(sx),int(sy),sz,sz))
+        else:
+            # HIGH/MEDIUM LOD: blit cached tiles
+            for r in range(r0,r1):
+                for c in range(c0,c1):
+                    t=grid.cells[r][c]
+                    surf=tcache.get(t.type,t.rotation,lod)
+                    if surf is None: continue
+                    wx,wy=c*T,r*T
+                    sx,sy=cam.world_to_screen(wx,wy)
+                    sz=int(T*cam.zoom)
+                    if sz<2: continue
+                    if sz!=T:
+                        scaled=pygame.transform.scale(surf,(sz,sz))
+                        screen.blit(scaled,(int(sx),int(sy)))
+                    else:
+                        screen.blit(surf,(int(sx),int(sy)))
+
+        # Node dots
+        if show_nodes and lod>=2:
+            for r in range(r0,r1):
+                for c in range(c0,c1):
+                    t=grid.cells[r][c]
+                    if t.type in (CURVE,TJUNCTION,CROSS):
+                        sx,sy=cam.world_to_screen((c+.5)*T,(r+.5)*T)
+                        pygame.draw.circle(screen,C_NODE,(int(sx),int(sy)),max(2,int(4*cam.zoom)))
+
+        # Explored overlay
+        if explored_set and lod>=1:
+            sz=max(1,int(T*cam.zoom))
+            es=pygame.Surface((sz,sz),pygame.SRCALPHA)
+            es.fill((40,80,140,50))
+            for c,r in explored_set:
+                if c0<=c<c1 and r0<=r<r1:
+                    sx,sy=cam.world_to_screen(c*T,r*T)
+                    screen.blit(es,(int(sx),int(sy)))
+
+        # Path overlay (smooth Bézier curve)
+        if world_path and len(world_path)>=2:
+            pw=max(2,int(6*cam.zoom))
+            for i in range(len(world_path)-1):
+                s1=cam.world_to_screen(world_path[i][0],world_path[i][1])
+                s2=cam.world_to_screen(world_path[i+1][0],world_path[i+1][1])
+                pygame.draw.line(screen,C_PATH,(int(s1[0]),int(s1[1])),(int(s2[0]),int(s2[1])),pw)
+
+        # Start/End markers
+        mr=max(4,int(12*cam.zoom))
+        if start_pt:
+            sx,sy=cam.world_to_screen((start_pt[0]+.5)*T,(start_pt[1]+.5)*T)
+            pygame.draw.circle(screen,C_START,(int(sx),int(sy)),mr)
+            if cam.zoom>0.3:
+                lt=font.render("A",True,(255,255,255))
+                screen.blit(lt,(int(sx)-lt.get_width()//2,int(sy)-lt.get_height()//2))
+        if end_pt:
+            sx,sy=cam.world_to_screen((end_pt[0]+.5)*T,(end_pt[1]+.5)*T)
+            pygame.draw.circle(screen,C_END,(int(sx),int(sy)),mr)
+            if cam.zoom>0.3:
+                lt=font.render("B",True,(255,255,255))
+                screen.blit(lt,(int(sx)-lt.get_width()//2,int(sy)-lt.get_height()//2))
+
+        # Hover highlight
+        if hover_valid and not cam.dragging:
+            sx,sy=cam.world_to_screen(hover_c*T,hover_r*T)
+            sz=max(1,int(T*cam.zoom))
+            hs=pygame.Surface((sz,sz),pygame.SRCALPHA); hs.fill((255,220,60,40))
+            screen.blit(hs,(int(sx),int(sy)))
+
+        # Car
+        car.draw(screen,cam)
+
+        # Car trail (smooth world coords)
+        if car.trail and lod>=1:
+            tw=max(1,int(3*cam.zoom))
+            step=max(1,len(car.trail)//150)  # thin out for performance
+            for i in range(0,len(car.trail)-step,step):
+                wx1,wy1=car.trail[i]; wx2,wy2=car.trail[i+step]
+                s1=cam.world_to_screen(wx1,wy1)
+                s2=cam.world_to_screen(wx2,wy2)
+                pygame.draw.line(screen,(255,175,40),(int(s1[0]),int(s1[1])),(int(s2[0]),int(s2[1])),tw)
+
+        # ── MINIMAP ──
+        mm_x,mm_y=W-minimap_surf.get_width()-12,H-minimap_surf.get_height()-12
+        # bg
+        pygame.draw.rect(screen,(10,12,20),(mm_x-4,mm_y-4,minimap_surf.get_width()+8,minimap_surf.get_height()+8),border_radius=4)
+        screen.blit(minimap_surf,(mm_x,mm_y))
+        # viewport rect
+        vl,vt=cam.screen_to_world(0,0); vr,vb=cam.screen_to_world(W,H)
+        rl=mm_x+int(vl/T*minimap_sc); rt2=mm_y+int(vt/T*minimap_sc)
+        rw=max(2,int((vr-vl)/T*minimap_sc)); rh=max(2,int((vb-vt)/T*minimap_sc))
+        pygame.draw.rect(screen,(200,200,200,180),(rl,rt2,rw,rh),1)
+        # car on minimap
+        if car.active and car.world_pts:
+            cwx,cwy=car.get_world_pos()
+            cmx=mm_x+int(cwx/T*minimap_sc); cmy=mm_y+int(cwy/T*minimap_sc)
+            pygame.draw.circle(screen,(255,200,40),(cmx,cmy),3)
+
+        # ── HUD ──
+        lines=[
+            f"Seed: {seed:06X}   Grid: {GCOLS}x{GROWS}   Roads: {road_count}   Dead: {dead_count}   Zoom: {cam.zoom:.2f}x   LOD: {['LOW','MED','HIGH'][lod]}",
         ]
-        for i, line in enumerate(lines):
-            color = (100, 130, 200) if not line.startswith("[") else (70, 90, 140)
-            surf = font.render(line, True, color)
-            screen.blit(surf, (14, 14 + i * 18))
+        if start_pt: lines.append(f"Start: {start_pt}  End: {end_pt or '(click road)'}  Path: {len(path_result) if path_result else 'N/A'} tiles")
+        elif select_mode==0: lines.append("Click a road tile to set START point")
+        else: lines.append("Click a road tile to set END point")
+        if car.active: lines.append(f"Car speed: {car.speed:.1f} t/s  {'FINISHED' if car.finished else 'MOVING' if car.active else 'PAUSED'}")
+        for i,ln in enumerate(lines):
+            ts=font.render(ln,True,C_UI); bg=pygame.Surface((ts.get_width()+8,ts.get_height()+2),pygame.SRCALPHA)
+            bg.fill((13,15,23,180)); screen.blit(bg,(8,8+i*18)); screen.blit(ts,(12,9+i*18))
+
+        # Controls
+        ctrls=["[R] New map","[P] Random A/B","[Space] Start car","[F] Follow","[C] Clear","[N] Nodes","[+/-] Speed","[ESC] Quit"]
+        for i,ct in enumerate(ctrls):
+            ts=font.render(ct,True,C_UIK)
+            bg=pygame.Surface((ts.get_width()+8,ts.get_height()+2),pygame.SRCALPHA)
+            bg.fill((13,15,23,160)); screen.blit(bg,(8,H-12-(len(ctrls)-i)*17)); screen.blit(ts,(12,H-11-(len(ctrls)-i)*17))
 
         pygame.display.flip()
-        clock.tick(60)
+    pygame.quit(); sys.exit()
 
-    pygame.quit()
-    sys.exit()
-
-
-if __name__ == "__main__":
+if __name__=="__main__":
     main()

@@ -367,7 +367,7 @@ def _choose_border_exits(cols, rows, rng):
     inner_c = list(range(2, cols - 2))  # avoid corners more
     inner_r = list(range(2, rows - 2))
     for side in range(4):
-        n = rng.randint(2, 3)
+        n = rng.randint(2, max(3, min(cols, rows) // 8))
         if side == 0:
             for ci in rng.sample(inner_c, min(n, len(inner_c))):
                 exits.add((ci, 0))
@@ -500,7 +500,7 @@ def _heal_dead_ends_v2(grid, seed_c, seed_r, rng):
                 if not border_targets:
                     continue
                 path = _bfs_path_to_target(grid, nc, nr, border_targets)
-                if path and len(path) <= 8:
+                if path and len(path) <= max(8, min(cols, rows) // 4):
                     if d not in ports:
                         _upgrade_tile_port(grid, c, r, d)
                     if _build_road_along_path(grid, [(c, r)] + path, rng) > 0:
@@ -516,12 +516,13 @@ def _heal_dead_ends_v2(grid, seed_c, seed_r, rng):
                 nb = grid.get(nc, nr)
                 if nb is None or nb.type != EMPTY:
                     continue
+                search_r = max(4, min(cols, rows) // 8)
                 nearby = {(cc, rr)
-                          for rr in range(max(0, r-4), min(rows, r+5))
-                          for cc in range(max(0, c-4), min(cols, c+5))
+                          for rr in range(max(0, r-search_r), min(rows, r+search_r+1))
+                          for cc in range(max(0, c-search_r), min(cols, c+search_r+1))
                           if (cc, rr) != (c, r) and grid.is_road(cc, rr)}
                 path = _bfs_path_to_target(grid, nc, nr, nearby)
-                if path and len(path) <= 5:
+                if path and len(path) <= max(5, min(cols, rows) // 6):
                     if d not in ports:
                         _upgrade_tile_port(grid, c, r, d)
                     if _build_road_along_path(grid, [(c, r)] + path, rng) > 0:
