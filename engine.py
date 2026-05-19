@@ -27,6 +27,31 @@ def get_ports(tile_type, rotation):
     return options[rotation % len(options)]
 
 
+def find_nearest_road(grid, c, r):
+    """Find nearest road tile to (c,r). Returns (col,row) or None."""
+    for d in range(4):
+        dc, dr = DIR_DELTA[d]
+        nc, nr = c + dc, r + dr
+        if grid.is_road(nc, nr):
+            return (nc, nr)
+    from collections import deque
+    visited = {(c, r)}
+    queue = deque([(c, r)])
+    for _ in range(60):
+        if not queue: break
+        cx2, cy2 = queue.popleft()
+        for d in range(4):
+            dc, dr = DIR_DELTA[d]
+            nc, nr = cx2 + dc, cy2 + dr
+            if (nc, nr) in visited: continue
+            if not (0 <= nc < grid.cols and 0 <= nr < grid.rows): continue
+            visited.add((nc, nr))
+            if grid.is_road(nc, nr):
+                return (nc, nr)
+            queue.append((nc, nr))
+    return None
+
+
 # ═══════════════════════════════════════
 # CAMERA
 # ═══════════════════════════════════════
