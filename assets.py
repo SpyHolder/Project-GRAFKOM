@@ -3,6 +3,7 @@ Seruni Map — Asset System
 Gerobak, Basecamp, Rumah, Pohon: placement + Pygame rendering.
 """
 import random, math, pygame
+from config import DIR_DELTA
 
 # ── Asset types ──
 ASSET_NONE = 0
@@ -12,8 +13,6 @@ ASSET_RUMAH = 3
 ASSET_POHON = 4
 ASSET_NAMES = {ASSET_GEROBAK:"Gerobak", ASSET_BASECAMP:"Basecamp",
                ASSET_RUMAH:"Rumah", ASSET_POHON:"Pohon"}
-
-DIR_DELTA = {0:(0,-1), 1:(1,0), 2:(0,1), 3:(-1,0)}
 
 
 class AssetCell:
@@ -60,19 +59,41 @@ def place_assets(road_grid, seed=None):
         ag.set_asset(c, r, ASSET_BASECAMP, rot=dirs[0], var=0)
         roadside.pop(i); break
 
-    # Phase 2: Other roadside assets
+    # Phase 2: Place exactly 5-6 gerobaks, spread out
     rng.shuffle(roadside)
-    weights = [(ASSET_GEROBAK, 0.22), (ASSET_RUMAH, 0.33), (ASSET_POHON, 0.45)]
+    n_gerobak = rng.randint(5, 10)
+    placed_gerobak = []
+    remaining = []
     for c,r,dirs in roadside:
-        roll = rng.random(); cum = 0; chosen = ASSET_POHON
-        for at,w in weights:
-            cum += w
-            if roll < cum: chosen = at; break
-        ag.set_asset(c, r, chosen, rot=rng.choice(dirs), var=rng.randint(0,3))
+        if len(placed_gerobak) < n_gerobak:
+            # Ensure minimum distance from other gerobaks
+            too_close = any(abs(c-gc)+abs(r-gr) < max(cols,rows)//8
+                           for gc,gr in placed_gerobak)
+            if not too_close:
+                ag.set_asset(c, r, ASSET_GEROBAK, rot=rng.choice(dirs), var=rng.randint(0,3))
+                placed_gerobak.append((c,r))
+                continue
+        remaining.append((c, r, dirs))
+    # If not enough placed (tiles too clustered), force remaining
+    for c,r,dirs in remaining[:]:
+        if len(placed_gerobak) >= n_gerobak: break
+        ag.set_asset(c, r, ASSET_GEROBAK, rot=rng.choice(dirs), var=rng.randint(0,3))
+        placed_gerobak.append((c,r))
+        remaining.remove((c,r,dirs))
 
-    # Phase 3: Fill empty with trees
+    # Phase 3: Remaining roadside → rumah 40%, pohon 60%
+    for c,r,dirs in remaining:
+        if rng.random() < 0.40:
+            ag.set_asset(c, r, ASSET_RUMAH, rot=rng.choice(dirs), var=rng.randint(0,3))
+        else:
+            ag.set_asset(c, r, ASSET_POHON, rot=0, var=rng.randint(0,5))
+
+    # Phase 3: Randomly scatter trees on remaining empty tiles (~60%)
+    rng.shuffle(non_roadside)
+    tree_chance = 0.6
     for c,r in non_roadside:
-        ag.set_asset(c, r, ASSET_POHON, var=rng.randint(0,5))
+        if rng.random() < tree_chance:
+            ag.set_asset(c, r, ASSET_POHON, var=rng.randint(0,5))
 
     return ag
 
@@ -185,28 +206,46 @@ def draw_rumah(size=80):
 
 
 def draw_pohon(size=80, variant=0):
-    """Top-down tree: green canopy circle + trunk."""
+    """Top-down tree with visible trunk, roots, and layered canopy."""
     s = pygame.Surface((size, size), pygame.SRCALPHA)
     cx, cy = size//2, size//2
     rng = random.Random(variant * 137 + 42)
-    # Variation
     base_g = 35 + rng.randint(-8, 8)
     canopy_r = 14 + rng.randint(-3, 5)
     # Shadow
-    pygame.draw.circle(s, (8,10,16), (cx+2, cy+2), canopy_r+2)
-    # Trunk
-    tw = max(2, canopy_r//4)
-    pygame.draw.rect(s, (50+rng.randint(-10,10), 35+rng.randint(-5,5), 20),
-                     (cx-tw//2, cy-tw//2, tw, tw+2))
-    # Canopy layers (2-3 overlapping circles for organic look)
-    offsets = [(0,0), (rng.randint(-3,3), rng.randint(-3,3))]
-    if variant > 2: offsets.append((rng.randint(-2,2), rng.randint(-2,2)))
-    for ox,oy in offsets:
-        g = base_g + rng.randint(-5,5)
-        r_adj = canopy_r + rng.randint(-2,1)
-        pygame.draw.circle(s, (15, g, 18), (cx+ox, cy+oy), r_adj)
-    # Highlight
-    pygame.draw.circle(s, (20, base_g+12, 22), (cx-3, cy-3), canopy_r//2)
+    pygame.draw.circle(s, (8,10,16), (cx+3, cy+3), canopy_r+4)
+    # Trunk (prominent, visible extending from canopy)
+    trunk_w = max(4, canopy_r // 2)
+    trunk_h = max(8, canopy_r)
+    trunk_col = (55+rng.randint(-10,10), 38+rng.randint(-5,5), 22)
+    trunk_dark = (40+rng.randint(-8,8), 28+rng.randint(-4,4), 16)
+    # Main trunk
+    tx, ty = cx - trunk_w//2, cy - trunk_h//4
+    pygame.draw.rect(s, trunk_col, (tx, ty, trunk_w, trunk_h), border_radius=2)
+    # Trunk bark texture line
+    pygame.draw.line(s, trunk_dark, (cx, ty+2), (cx, ty+trunk_h-2), 1)
+    # Root branches extending from trunk base
+    root_y = ty + trunk_h - 2
+    for rx, ry_off in [(-trunk_w, 2), (trunk_w, 3), (-trunk_w//2, 4)]:
+        pygame.draw.line(s, trunk_dark, (cx, root_y), (cx+rx, root_y+ry_off), 2)
+    # Canopy layers (3-4 overlapping circles)
+    offsets = [(0, -2), (rng.randint(-4,4), rng.randint(-4,2)),
+              (rng.randint(-3,3), rng.randint(-3,3))]
+    if variant > 2:
+        offsets.append((rng.randint(-3,3), rng.randint(-2,2)))
+    # Dark base layer
+    for ox, oy in offsets:
+        g = base_g + rng.randint(-8, -2)
+        r_adj = canopy_r + rng.randint(0, 3)
+        pygame.draw.circle(s, (12, g, 14), (cx+ox, cy+oy-1), r_adj)
+    # Main canopy
+    for ox, oy in offsets:
+        g = base_g + rng.randint(-3, 5)
+        r_adj = canopy_r + rng.randint(-2, 1)
+        pygame.draw.circle(s, (15, g, 18), (cx+ox, cy+oy-2), r_adj)
+    # Highlight spots
+    pygame.draw.circle(s, (22, base_g+15, 25), (cx-3, cy-4), canopy_r//2)
+    pygame.draw.circle(s, (25, base_g+18, 28, 120), (cx-5, cy-5), canopy_r//3)
     return s
 
 

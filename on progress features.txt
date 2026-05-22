@@ -1,3 +1,0 @@
-- perbaikan asset pohon yang terlalu banyak
-- pembagian/perbaikan struktur file seperti file untuk assets, algoritma generatif map, algoritma path finding, base file
-- perbaikan jalan yang masih buntu
