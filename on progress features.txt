@@ -1,3 +1,0 @@
-- aset untuk gerobak seruni, basecamp seruni, rumah, dan pohon
-- pembagian/perbaikan struktur file seperti file untuk assets, algoritma generatif map, algoritma path finding, base file
-- perbaikan jalan yang masih buntu

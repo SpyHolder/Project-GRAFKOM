@@ -4,29 +4,8 @@ Produces winding, organic road networks with minimal intersections.
 """
 import random
 from collections import deque
-
-# ── Tile constants ──
-EMPTY = 0
-STRAIGHT = 1
-CURVE = 2
-TJUNCTION = 3
-CROSS = 4
-
-TILE_PORTS = {
-    STRAIGHT: [{0, 2}, {1, 3}],
-    CURVE: [{0, 1}, {1, 2}, {2, 3}, {3, 0}],
-    TJUNCTION: [{0, 1, 2}, {1, 2, 3}, {2, 3, 0}, {3, 0, 1}],
-    CROSS: [{0, 1, 2, 3}],
-}
-OPPOSITE = {0: 2, 2: 0, 1: 3, 3: 1}
-DIR_DELTA = {0: (0, -1), 1: (1, 0), 2: (0, 1), 3: (-1, 0)}
-
-
-def get_ports(tile_type, rotation):
-    options = TILE_PORTS.get(tile_type, [])
-    if not options:
-        return set()
-    return options[rotation % len(options)]
+from config import (EMPTY, STRAIGHT, CURVE, TJUNCTION, CROSS,
+                    TILE_PORTS, OPPOSITE, DIR_DELTA, get_ports)
 
 
 def _is_border(c, r, cols, rows):
@@ -727,5 +706,57 @@ def generate_map(cols, rows, seed=None):
             for c2 in range(cols):
                 if grid.is_road(c2, r2) and _tile_degree(grid, c2, r2) == 0:
                     grid.set_tile(c2, r2, EMPTY, 0)
+    # Downgrade over-complex tiles: T-junction/Cross with unused arms → curve/straight
+    for _dg in range(5):
+        changed = False
+        for r in range(rows):
+            for c in range(cols):
+                tile = grid.get(c, r)
+                if tile is None or tile.type not in (TJUNCTION, CROSS):
+                    continue
+                deg = _tile_degree(grid, c, r)
+                ports = get_ports(tile.type, tile.rotation)
+                # Find which ports are actually connected
+                connected = set()
+                for d in ports:
+                    dc, dr = DIR_DELTA[d]
+                    nb = grid.get(c + dc, r + dr)
+                    if nb and nb.type != EMPTY:
+                        if OPPOSITE[d] in get_ports(nb.type, nb.rotation):
+                            connected.add(d)
+                if len(connected) >= len(ports):
+                    continue  # all ports used, no downgrade needed
+                # Find simplest tile that has exactly the connected ports
+                best = None
+                for tt, rotations in TILE_PORTS.items():
+                    for rot, tp in enumerate(rotations):
+                        if connected.issubset(tp) and len(tp) <= len(connected):
+                            if best is None or len(tp) < len(get_ports(best[0], best[1])):
+                                best = (tt, rot)
+                        elif connected == tp:
+                            best = (tt, rot)
+                            break
+                if best is None:
+                    # Try tiles that contain connected ports (superset ok if small)
+                    for tt, rotations in TILE_PORTS.items():
+                        for rot, tp in enumerate(rotations):
+                            if connected.issubset(tp):
+                                extra = tp - connected
+                                # Check extra ports don't connect to anything
+                                ok = True
+                                for ep in extra:
+                                    edc, edr = DIR_DELTA[ep]
+                                    enb = grid.get(c + edc, r + edr)
+                                    if enb and enb.type != EMPTY:
+                                        if OPPOSITE[ep] in get_ports(enb.type, enb.rotation):
+                                            ok = False
+                                            break
+                                if ok and (best is None or len(tp) < len(get_ports(best[0], best[1]))):
+                                    best = (tt, rot)
+                if best and best != (tile.type, tile.rotation):
+                    grid.set_tile(c, r, best[0], best[1])
+                    changed = True
+        if not changed:
+            break
 
     return grid
