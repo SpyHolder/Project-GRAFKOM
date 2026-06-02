@@ -1,4 +1,15 @@
 """
+Kontribusi Modul Camera
+
+Modul camera.py dikembangkan untuk mengelola viewport pada peta generatif,
+meliputi navigasi kamera, zoom, panning, konversi koordinat world-space
+ke screen-space, optimasi rendering menggunakan Level of Detail (LOD),
+serta tile caching untuk meningkatkan performa visualisasi.
+
+Modul ini merupakan komponen utama yang memungkinkan pengguna
+menjelajahi peta secara interaktif dalam simulasi grafika komputer.
+"""
+"""
 Seruni Map — Camera System
 
 Modul ini mengatur sistem kamera pada peta generatif Seruni Map.
