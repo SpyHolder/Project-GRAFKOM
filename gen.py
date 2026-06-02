@@ -165,14 +165,6 @@ def _flood_fill(grid, start_c, start_r):
     return visited
 
 
-def _all_road_cells(grid):
-    roads = set()
-    for r in range(grid.rows):
-        for c in range(grid.cols):
-            if grid.is_road(c, r):
-                roads.add((c, r))
-    return roads
-
 
 def _find_dead_ends(grid):
     dead = []

@@ -16,9 +16,9 @@ class Camera:
         self.max_zoom = 3.0
         self.sw = screen_w
         self.sh = screen_h
-        self.dragging = False
+        self.dragging = False 
         self.drag_start = None
-        self.drag_cam = None
+        self.drag_cam = None 
 
     def world_to_screen(self, wx, wy):
         return ((wx - self.x) * self.zoom + self.sw / 2,
