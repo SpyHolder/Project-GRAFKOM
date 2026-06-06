@@ -64,11 +64,10 @@ class Camera:
         self.sw = screen_w
         self.sh = screen_h
 
+        self.drag_cam = None 
         # Variabel untuk fitur drag/panning
         self.dragging = False
         self.drag_start = None
-        self.drag_cam = None
-
     def world_to_screen(self, wx, wy):
         """
         Mengubah koordinat dunia (world coordinates)

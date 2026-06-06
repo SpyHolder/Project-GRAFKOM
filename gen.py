@@ -164,7 +164,6 @@ def _flood_fill(grid, start_c, start_r):
                     queue.append((nc, nr))
     return visited
 
-
 def _all_road_cells(grid):
     roads = set()
     for r in range(grid.rows):
@@ -172,6 +171,7 @@ def _all_road_cells(grid):
             if grid.is_road(c, r):
                 roads.add((c, r))
     return roads
+
 
 
 def _find_dead_ends(grid):
