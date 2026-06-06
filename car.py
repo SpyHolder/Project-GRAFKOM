@@ -38,6 +38,8 @@ class Car:
         self.finished = False
         self.trail = []
 
+    # Vehicle movement update using delta time and waypoint following
+    
     def update(self, dt, tile_size):
         if not self.active or self.finished or len(self.world_pts) < 2:
             return
@@ -97,6 +99,8 @@ class Car:
             pygame.draw.circle(surf, (255,40,40), (hx, by+bh-3), 2)
         return surf
 
+    # Render vehicle and trail effect
+    
     def draw(self, screen, camera):
         if not self.world_pts: return
         wx, wy = self.get_world_pos()
